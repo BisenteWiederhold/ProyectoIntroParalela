@@ -1,0 +1,4 @@
+BruteForce: 62.2383ms
+Sweep&Prune: 0.9959ms
+SpatialHashing CPU: 0.3556ms
+SpatialHashing GPU: 28.0625ms
