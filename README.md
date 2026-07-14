@@ -16,9 +16,8 @@ El programa mide el rendimiento dividiendo el trabajo en dos partes:
 
 En Windows, es necesario usar la consola especial de visual studio para que encuentre el compilador de C++.
 
-1. Abre el menú inicio y busca "x64 Native Tools Command Prompt".
-2. Navega con la consola hasta la carpeta de tu proyecto.
-3. Copia y pega esta línea para compilar:
+1. Se necesita abrir la consola "x64 Native Tools Command Prompt".
+2. Dentro solo se debe usar el siguiente comando
 
 ```bat
 nvcc bh.cu -o bh.exe -O3 -I raylib/include -L raylib/lib -lraylib -lwinmm -lgdi32 -luser32 -lshell32 -Xcompiler /MD
