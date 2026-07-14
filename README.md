@@ -22,6 +22,7 @@ En Windows, es necesario usar la consola especial de visual studio para que encu
 ```bat
 nvcc bh.cu -o bh.exe -O3 -I raylib/include -L raylib/lib -lraylib -lwinmm -lgdi32 -luser32 -lshell32 -Xcompiler /MD
 ```
+Y por ultimo correr el ```bh.exe ``` generado
 ### Flags
 
 * -o bh.exe: define el nombre del archivo ejecutable que se va a crear.
