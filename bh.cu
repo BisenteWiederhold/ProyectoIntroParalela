@@ -25,7 +25,14 @@ struct Entidad {
     int is_colliding;
 };
 
-// Spatial hashing GPU
+// Estructura para separar los tiempos
+struct Tiempos {
+    float broad;
+    float narrow;
+    float total() const { return broad + narrow; }
+};
+
+// Kernels CUDA
 __global__ void buildSpatialGrid(Entidad* entidades, int num_entidades, int* grid_counters, int* grid_cells, int max_por_celda) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_entidades) return;
@@ -43,7 +50,6 @@ __global__ void buildSpatialGrid(Entidad* entidades, int num_entidades, int* gri
     }
 }
 
-// Colisiones GPU
 __global__ void checkCollisions(Entidad* entidades, int num_entidades, int* grid_counters, int* grid_cells, int max_por_celda) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_entidades) return;
@@ -67,8 +73,12 @@ __global__ void checkCollisions(Entidad* entidades, int num_entidades, int* grid
     entidades[i].is_colliding = hit ? 1 : 0;
 }
 
-// Fuerza bruta CPU
-void checkCollisionsBruteForceCPU(std::vector<Entidad>& entidades, int n) {
+// Funciones CPU
+Tiempos checkCollisionsBruteForceCPU(std::vector<Entidad>& entidades, int n) {
+    Tiempos t;
+    t.broad = 0.0f; // La fuerza bruta no tiene broad phase
+    
+    auto t1 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < n; i++) {
         bool hit = false;
         for (int j = 0; j < n; j++) {
@@ -81,13 +91,24 @@ void checkCollisionsBruteForceCPU(std::vector<Entidad>& entidades, int n) {
         }
         entidades[i].is_colliding = hit ? 1 : 0;
     }
+    auto t2 = std::chrono::high_resolution_clock::now();
+    t.narrow = std::chrono::duration<float, std::milli>(t2 - t1).count();
+    return t;
 }
 
-// Sweep and prune CPU
-void checkCollisionsSweepAndPruneCPU(std::vector<Entidad>& entidades, int n) {
+Tiempos checkCollisionsSweepAndPruneCPU(std::vector<Entidad>& entidades, int n) {
+    Tiempos t;
+    
+    // Broad phase: ordenar por el eje x
+    auto t1 = std::chrono::high_resolution_clock::now();
     std::sort(entidades.begin(), entidades.begin() + n, [](const Entidad& a, const Entidad& b) {
         return (a.x - a.radio) < (b.x - b.radio);
     });
+    auto t2 = std::chrono::high_resolution_clock::now();
+    t.broad = std::chrono::duration<float, std::milli>(t2 - t1).count();
+
+    // Narrow phase: recorrer y hacer check de distancias
+    auto t3 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < n; i++) {
         float max_x_i = entidades[i].x + entidades[i].radio;
         bool hit = false;
@@ -100,10 +121,17 @@ void checkCollisionsSweepAndPruneCPU(std::vector<Entidad>& entidades, int n) {
         }
         entidades[i].is_colliding = hit ? 1 : 0;
     }
+    auto t4 = std::chrono::high_resolution_clock::now();
+    t.narrow = std::chrono::duration<float, std::milli>(t4 - t3).count();
+    
+    return t;
 }
 
-// Spatial hashing CPU
-void checkCollisionsSpatialHashingCPU(std::vector<Entidad>& entidades, std::vector<int>& grid_counters, std::vector<int>& grid_cells, int n) {
+Tiempos checkCollisionsSpatialHashingCPU(std::vector<Entidad>& entidades, std::vector<int>& grid_counters, std::vector<int>& grid_cells, int n) {
+    Tiempos t;
+    
+    // Broad phase: llenar la grilla espacial
+    auto t1 = std::chrono::high_resolution_clock::now();
     std::fill(grid_counters.begin(), grid_counters.end(), 0);
     for (int i = 0; i < n; i++) {
         Entidad& e = entidades[i];
@@ -119,6 +147,11 @@ void checkCollisionsSpatialHashingCPU(std::vector<Entidad>& entidades, std::vect
             }
         }
     }
+    auto t2 = std::chrono::high_resolution_clock::now();
+    t.broad = std::chrono::duration<float, std::milli>(t2 - t1).count();
+
+    // Narrow phase: buscar colisiones en la misma celda
+    auto t3 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < n; i++) {
         Entidad& e = entidades[i];
         int col = (int)(e.x / TAM_CELDA);
@@ -138,10 +171,13 @@ void checkCollisionsSpatialHashingCPU(std::vector<Entidad>& entidades, std::vect
         }
         e.is_colliding = hit ? 1 : 0;
     }
+    auto t4 = std::chrono::high_resolution_clock::now();
+    t.narrow = std::chrono::duration<float, std::milli>(t4 - t3).count();
+    
+    return t;
 }
 
 int main() {
-    // Inicializamos las entidades
     std::vector<Entidad> h_entidades(MAX_PARTICULAS);
     for (int i = 0; i < MAX_PARTICULAS; i++) {
         h_entidades[i].id = i;
@@ -162,63 +198,66 @@ int main() {
     CHECK_CUDA(cudaMalloc(&d_grid_counters, TOTAL_CELDAS * sizeof(int)));
     CHECK_CUDA(cudaMalloc(&d_grid_cells, TOTAL_CELDAS * MAX_VECINOS_POR_CELDA * sizeof(int)));
 
-    cudaEvent_t start_gpu, stop_gpu;
-    cudaEventCreate(&start_gpu); cudaEventCreate(&stop_gpu);
+    // Eventos CUDA para broad y narrow separados
+    cudaEvent_t start_gpu, mid_gpu, stop_gpu;
+    cudaEventCreate(&start_gpu); cudaEventCreate(&mid_gpu); cudaEventCreate(&stop_gpu);
     
-
-    //Benchmark para los graficos 
+    // Benchmark automatizado para los gráficos
     std::vector<int> test_sizes = {10000, 20000, 40000, 50000, 70000, 90000, 100000};
-    std::ofstream archivo("benchmark_final.csv");
+    std::ofstream archivo("benchmark_fases.csv");
     
-    // Cabecera del CSV
-    archivo << "N_Particulas,BruteForce_ms,SweepAndPrune_ms,SpatialHashingCPU_ms,SpatialHashingGPU_ms\n";
-    std::cout << "Iniciando Benchmark (puede tardar un poco en N grandes...)" << std::endl;
+    // Nueva cabecera con fases separadas
+    archivo << "N_Particulas,BF_Narrow,SAP_Broad,SAP_Narrow,SH_CPU_Broad,SH_CPU_Narrow,SH_GPU_Broad,SH_GPU_Narrow\n";
+    std::cout << "Iniciando benchmark separado por fases (puede tardar un poco en N grandes...)" << std::endl;
 
     for (int test_N : test_sizes) {
         std::cout << "Testeando N = " << test_N << "..." << std::endl;
 
-        // 1. Fuerza Bruta
-        auto t1 = std::chrono::high_resolution_clock::now();
-        checkCollisionsBruteForceCPU(h_entidades, test_N);
-        auto t2 = std::chrono::high_resolution_clock::now();
-        float ms_bf = std::chrono::duration<float, std::milli>(t2 - t1).count();
+        // 1. Fuerza bruta
+        Tiempos t_bf = checkCollisionsBruteForceCPU(h_entidades, test_N);
 
-        // 2. Sweep & Prune
-        t1 = std::chrono::high_resolution_clock::now();
-        checkCollisionsSweepAndPruneCPU(h_entidades, test_N);
-        t2 = std::chrono::high_resolution_clock::now();
-        float ms_sap = std::chrono::duration<float, std::milli>(t2 - t1).count();
+        // 2. Sweep & prune
+        Tiempos t_sap = checkCollisionsSweepAndPruneCPU(h_entidades, test_N);
 
-        // 3. Spatial Hashing CPU
-        t1 = std::chrono::high_resolution_clock::now();
-        checkCollisionsSpatialHashingCPU(h_entidades, cpu_grid_counters, cpu_grid_cells, test_N);
-        t2 = std::chrono::high_resolution_clock::now();
-        float ms_sh_cpu = std::chrono::duration<float, std::milli>(t2 - t1).count();
+        // 3. Spatial hashing CPU
+        Tiempos t_sh_cpu = checkCollisionsSpatialHashingCPU(h_entidades, cpu_grid_counters, cpu_grid_cells, test_N);
 
-        // 4. Spatial Hashing GPU
-        float ms_gpu = 0;
+        // 4. Spatial hashing GPU
         int blockSize = 256;
         int gridSize = (test_N + blockSize - 1) / blockSize;
-        cudaEventRecord(start_gpu);
+        
+        // Memcpy fuera de los contadores de algoritmo
         CHECK_CUDA(cudaMemcpyAsync(d_entidades, h_entidades.data(), test_N * sizeof(Entidad), cudaMemcpyHostToDevice));
+        
+        // Broad phase GPU: memset y build grid
+        cudaEventRecord(start_gpu);
         CHECK_CUDA(cudaMemsetAsync(d_grid_counters, 0, TOTAL_CELDAS * sizeof(int)));
         buildSpatialGrid<<<gridSize, blockSize>>>(d_entidades, test_N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
+        
+        // Narrow phase GPU: comprobación de colisiones
+        cudaEventRecord(mid_gpu);
         checkCollisions<<<gridSize, blockSize>>>(d_entidades, test_N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
-        CHECK_CUDA(cudaMemcpyAsync(h_entidades.data(), d_entidades, test_N * sizeof(Entidad), cudaMemcpyDeviceToHost));
         cudaEventRecord(stop_gpu);
         cudaEventSynchronize(stop_gpu);
-        cudaEventElapsedTime(&ms_gpu, start_gpu, stop_gpu);
+
+        float ms_gpu_broad = 0, ms_gpu_narrow = 0;
+        cudaEventElapsedTime(&ms_gpu_broad, start_gpu, mid_gpu);
+        cudaEventElapsedTime(&ms_gpu_narrow, mid_gpu, stop_gpu);
+
+        CHECK_CUDA(cudaMemcpyAsync(h_entidades.data(), d_entidades, test_N * sizeof(Entidad), cudaMemcpyDeviceToHost));
 
         // Guardar fila en el CSV
-        archivo << test_N << "," << ms_bf << "," << ms_sap << "," << ms_sh_cpu << "," << ms_gpu << "\n";
+        archivo << test_N << "," 
+                << t_bf.narrow << "," 
+                << t_sap.broad << "," << t_sap.narrow << "," 
+                << t_sh_cpu.broad << "," << t_sh_cpu.narrow << "," 
+                << ms_gpu_broad << "," << ms_gpu_narrow << "\n";
     }
     archivo.close();
-    std::cout << "Resultados guardados en 'benchmark_final.csv'." << std::endl;
-  
+    std::cout << "Benchmark completado, resultados en 'benchmark_fases.csv'" << std::endl;
 
-    // Inicio de simulación visual
-    int N = 10000; // N inicial para la ventana
-    InitWindow(ANCHO_MAPA, ALTO_MAPA, "Bullet Hell Benchmark");
+    int N = 10000; 
+    InitWindow(ANCHO_MAPA, ALTO_MAPA, "Bullet Hell Benchmark - Analisis de Fases");
     SetTargetFPS(60);
 
     int metodo = 3;
@@ -237,41 +276,48 @@ int main() {
             h_entidades[i].is_colliding = 0;
         }
 
-        float t_ms = 0;
+        Tiempos t_actual = {0, 0};
+
         if (metodo == 0) {
-            auto tr1 = std::chrono::high_resolution_clock::now();
-            checkCollisionsBruteForceCPU(h_entidades, N);
-            t_ms = std::chrono::duration<float, std::milli>(std::chrono::high_resolution_clock::now() - tr1).count();
+            t_actual = checkCollisionsBruteForceCPU(h_entidades, N);
         } else if (metodo == 1) {
-            auto tr1 = std::chrono::high_resolution_clock::now();
-            checkCollisionsSweepAndPruneCPU(h_entidades, N);
-            t_ms = std::chrono::duration<float, std::milli>(std::chrono::high_resolution_clock::now() - tr1).count();
+            t_actual = checkCollisionsSweepAndPruneCPU(h_entidades, N);
         } else if (metodo == 2) {
-            auto tr1 = std::chrono::high_resolution_clock::now();
-            checkCollisionsSpatialHashingCPU(h_entidades, cpu_grid_counters, cpu_grid_cells, N);
-            t_ms = std::chrono::duration<float, std::milli>(std::chrono::high_resolution_clock::now() - tr1).count();
+            t_actual = checkCollisionsSpatialHashingCPU(h_entidades, cpu_grid_counters, cpu_grid_cells, N);
         } else {
             int gSize = (N + 255) / 256;
-            cudaEventRecord(start_gpu);
             CHECK_CUDA(cudaMemcpyAsync(d_entidades, h_entidades.data(), N * sizeof(Entidad), cudaMemcpyHostToDevice));
+            
+            cudaEventRecord(start_gpu);
             CHECK_CUDA(cudaMemsetAsync(d_grid_counters, 0, TOTAL_CELDAS * sizeof(int)));
             buildSpatialGrid<<<gSize, 256>>>(d_entidades, N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
+            cudaEventRecord(mid_gpu);
             checkCollisions<<<gSize, 256>>>(d_entidades, N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
-            CHECK_CUDA(cudaMemcpyAsync(h_entidades.data(), d_entidades, N * sizeof(Entidad), cudaMemcpyDeviceToHost));
             cudaEventRecord(stop_gpu);
             cudaEventSynchronize(stop_gpu);
-            cudaEventElapsedTime(&t_ms, start_gpu, stop_gpu);
+
+            cudaEventElapsedTime(&t_actual.broad, start_gpu, mid_gpu);
+            cudaEventElapsedTime(&t_actual.narrow, mid_gpu, stop_gpu);
+            
+            CHECK_CUDA(cudaMemcpyAsync(h_entidades.data(), d_entidades, N * sizeof(Entidad), cudaMemcpyDeviceToHost));
         }
 
         BeginDrawing();
         ClearBackground(RAYWHITE);
         for (int i = 0; i < N; i++) DrawRectangle(h_entidades[i].x, h_entidades[i].y, h_entidades[i].radio * 2, h_entidades[i].radio * 2, h_entidades[i].is_colliding ? MAROON : SKYBLUE);
-        DrawRectangle(10, 10, 300, 100, Fade(BLACK, 0.7f));
+        DrawRectangle(10, 10, 320, 130, Fade(BLACK, 0.8f));
         DrawText(TextFormat("N: %i | FPS: %i", N, GetFPS()), 20, 20, 20, GREEN);
         DrawText(nombres[metodo].c_str(), 20, 45, 20, GOLD);
-        DrawText(TextFormat("Calc: %.3f ms", t_ms), 20, 70, 20, WHITE);
+        
+        // Renderizado de las fases por separado
+        DrawText(TextFormat("Broad:  %.3f ms", t_actual.broad), 20, 75, 18, ORANGE);
+        DrawText(TextFormat("Narrow: %.3f ms", t_actual.narrow), 20, 95, 18, RED);
+        DrawText(TextFormat("TOTAL:  %.3f ms", t_actual.total()), 20, 115, 18, WHITE);
+        
         EndDrawing();
     }
+    
+    cudaEventDestroy(start_gpu); cudaEventDestroy(mid_gpu); cudaEventDestroy(stop_gpu);
     cudaFree(d_entidades); cudaFree(d_grid_counters); cudaFree(d_grid_cells);
     CloseWindow();
     return 0;
