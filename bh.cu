@@ -25,7 +25,7 @@ struct Entidad {
     int is_colliding;
 };
 
-// Spatial hashing
+// Spatial hashing GPU
 __global__ void buildSpatialGrid(Entidad* entidades, int num_entidades, int* grid_counters, int* grid_cells, int max_por_celda) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_entidades) return;
@@ -43,7 +43,7 @@ __global__ void buildSpatialGrid(Entidad* entidades, int num_entidades, int* gri
     }
 }
 
-// Colisiones
+// Colisiones GPU
 __global__ void checkCollisions(Entidad* entidades, int num_entidades, int* grid_counters, int* grid_cells, int max_por_celda) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_entidades) return;
@@ -141,8 +141,7 @@ void checkCollisionsSpatialHashingCPU(std::vector<Entidad>& entidades, std::vect
 }
 
 int main() {
-    int N = 10000; 
-
+    // Inicializamos las entidades
     std::vector<Entidad> h_entidades(MAX_PARTICULAS);
     for (int i = 0; i < MAX_PARTICULAS; i++) {
         h_entidades[i].id = i;
@@ -166,37 +165,60 @@ int main() {
     cudaEvent_t start_gpu, stop_gpu;
     cudaEventCreate(&start_gpu); cudaEventCreate(&stop_gpu);
     
-    // Benchmark a txt
-    std::ofstream archivo("benchmark_inicial.txt");
-    auto t1 = std::chrono::high_resolution_clock::now();
-    checkCollisionsBruteForceCPU(h_entidades, N);
-    auto t2 = std::chrono::high_resolution_clock::now();
-    archivo << "BruteForce: " << std::chrono::duration<float, std::milli>(t2 - t1).count() << "ms\n";
-    t1 = std::chrono::high_resolution_clock::now();
-    checkCollisionsSweepAndPruneCPU(h_entidades, N);
-    t2 = std::chrono::high_resolution_clock::now();
-    archivo << "Sweep&Prune: " << std::chrono::duration<float, std::milli>(t2 - t1).count() << "ms\n";
-    t1 = std::chrono::high_resolution_clock::now();
-    checkCollisionsSpatialHashingCPU(h_entidades, cpu_grid_counters, cpu_grid_cells, N);
-    t2 = std::chrono::high_resolution_clock::now();
-    archivo << "SpatialHashing CPU: " << std::chrono::duration<float, std::milli>(t2 - t1).count() << "ms\n";
-    
-    float ms_gpu = 0;
-    int blockSize = 256;
-    int gridSize = (N + blockSize - 1) / blockSize;
-    cudaEventRecord(start_gpu);
-    CHECK_CUDA(cudaMemcpyAsync(d_entidades, h_entidades.data(), N * sizeof(Entidad), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemsetAsync(d_grid_counters, 0, TOTAL_CELDAS * sizeof(int)));
-    buildSpatialGrid<<<gridSize, blockSize>>>(d_entidades, N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
-    checkCollisions<<<gridSize, blockSize>>>(d_entidades, N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
-    CHECK_CUDA(cudaMemcpyAsync(h_entidades.data(), d_entidades, N * sizeof(Entidad), cudaMemcpyDeviceToHost));
-    cudaEventRecord(stop_gpu);
-    cudaEventSynchronize(stop_gpu);
-    cudaEventElapsedTime(&ms_gpu, start_gpu, stop_gpu);
-    archivo << "SpatialHashing GPU: " << ms_gpu << "ms\n";
-    archivo.close();
 
-    InitWindow(ANCHO_MAPA, ALTO_MAPA, "Bullet Hell");
+    //Benchmark para los graficos 
+    std::vector<int> test_sizes = {10000, 20000, 40000, 50000, 70000, 90000, 100000};
+    std::ofstream archivo("benchmark_final.csv");
+    
+    // Cabecera del CSV
+    archivo << "N_Particulas,BruteForce_ms,SweepAndPrune_ms,SpatialHashingCPU_ms,SpatialHashingGPU_ms\n";
+    std::cout << "Iniciando Benchmark (puede tardar un poco en N grandes...)" << std::endl;
+
+    for (int test_N : test_sizes) {
+        std::cout << "Testeando N = " << test_N << "..." << std::endl;
+
+        // 1. Fuerza Bruta
+        auto t1 = std::chrono::high_resolution_clock::now();
+        checkCollisionsBruteForceCPU(h_entidades, test_N);
+        auto t2 = std::chrono::high_resolution_clock::now();
+        float ms_bf = std::chrono::duration<float, std::milli>(t2 - t1).count();
+
+        // 2. Sweep & Prune
+        t1 = std::chrono::high_resolution_clock::now();
+        checkCollisionsSweepAndPruneCPU(h_entidades, test_N);
+        t2 = std::chrono::high_resolution_clock::now();
+        float ms_sap = std::chrono::duration<float, std::milli>(t2 - t1).count();
+
+        // 3. Spatial Hashing CPU
+        t1 = std::chrono::high_resolution_clock::now();
+        checkCollisionsSpatialHashingCPU(h_entidades, cpu_grid_counters, cpu_grid_cells, test_N);
+        t2 = std::chrono::high_resolution_clock::now();
+        float ms_sh_cpu = std::chrono::duration<float, std::milli>(t2 - t1).count();
+
+        // 4. Spatial Hashing GPU
+        float ms_gpu = 0;
+        int blockSize = 256;
+        int gridSize = (test_N + blockSize - 1) / blockSize;
+        cudaEventRecord(start_gpu);
+        CHECK_CUDA(cudaMemcpyAsync(d_entidades, h_entidades.data(), test_N * sizeof(Entidad), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemsetAsync(d_grid_counters, 0, TOTAL_CELDAS * sizeof(int)));
+        buildSpatialGrid<<<gridSize, blockSize>>>(d_entidades, test_N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
+        checkCollisions<<<gridSize, blockSize>>>(d_entidades, test_N, d_grid_counters, d_grid_cells, MAX_VECINOS_POR_CELDA);
+        CHECK_CUDA(cudaMemcpyAsync(h_entidades.data(), d_entidades, test_N * sizeof(Entidad), cudaMemcpyDeviceToHost));
+        cudaEventRecord(stop_gpu);
+        cudaEventSynchronize(stop_gpu);
+        cudaEventElapsedTime(&ms_gpu, start_gpu, stop_gpu);
+
+        // Guardar fila en el CSV
+        archivo << test_N << "," << ms_bf << "," << ms_sap << "," << ms_sh_cpu << "," << ms_gpu << "\n";
+    }
+    archivo.close();
+    std::cout << "Resultados guardados en 'benchmark_final.csv'." << std::endl;
+  
+
+    // Inicio de simulación visual
+    int N = 10000; // N inicial para la ventana
+    InitWindow(ANCHO_MAPA, ALTO_MAPA, "Bullet Hell Benchmark");
     SetTargetFPS(60);
 
     int metodo = 3;
@@ -253,4 +275,4 @@ int main() {
     cudaFree(d_entidades); cudaFree(d_grid_counters); cudaFree(d_grid_cells);
     CloseWindow();
     return 0;
-} 
+}
